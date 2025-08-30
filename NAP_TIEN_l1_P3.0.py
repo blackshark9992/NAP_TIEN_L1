@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -26,7 +27,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, \
-    QPushButton, QLineEdit, QComboBox, QMessageBox
+    QPushButton, QLineEdit, QComboBox, QMessageBox, QDialog, QCheckBox, QDialogButtonBox
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
 from PyQt5.QtWidgets import QApplication, QMainWindow
 
@@ -46,7 +47,7 @@ import webbrowser
 from PyQt5.QtWidgets import QMessageBox
 
 # KHAI BÁO PHIÊN BẢN HIỆN TẠI CỦA ỨNG DỤNG
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.1.1"
 
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO, filename="roulette.log", format="%(asctime)s - %(levelname)s - %(message)s")
@@ -1567,7 +1568,65 @@ class Worker(QThread):
                 logging.error(f"Lỗi khi dừng trình duyệt cho {self.username}: {e}")
                 self.status_updated.emit(self.username, f"Lỗi dừng trình duyệt: {str(e)}", ip)
 
+
+from PyQt5.QtCore import QThread, pyqtSignal
+
+
+class DownloadThread(QThread):
+    # Dinh nghia cac tin hieu
+    progress = pyqtSignal(int)  # Tin hieu cap nhat tien trinh (gui di so %)
+    finished = pyqtSignal(str)  # Tin hieu hoan thanh (gui di duong dan file da tai)
+    error = pyqtSignal(str)  # Tin hieu bao loi
+
+    def __init__(self, url, save_path):
+        super().__init__()
+        self.url = url
+        self.save_path = save_path
+
+    def run(self):
+        try:
+            response = requests.get(self.url, stream=True)
+            response.raise_for_status()
+
+            total_size = int(response.headers.get('content-length', 0))
+            bytes_downloaded = 0
+
+            with open(self.save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    bytes_downloaded += len(chunk)
+                    if total_size > 0:
+                        percentage = int((bytes_downloaded / total_size) * 100)
+                        self.progress.emit(percentage)
+
+            # Khi hoan thanh, gui tin hieu finished
+            self.finished.emit(self.save_path)
+        except Exception as e:
+            # Khi co loi, gui tin hieu error
+            self.error.emit(str(e))
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+from PyQt5.QtWidgets import QProgressBar
+
+class UpdateDialog(QDialog):
+    def __init__(self, parent, title, message):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(350)
+
+        layout = QVBoxLayout(self)
+
+        self.message_label = QLabel(message)
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label)
+
+        self.skip_checkbox = QCheckBox("Bỏ qua phiên bản này")
+        layout.addWidget(self.skip_checkbox)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1646,9 +1705,12 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.clear_button)
         layout.addLayout(button_layout)
 
-        self.workers = []
-        self.proxy_threads = []
-        self.load_config()
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setTextVisible(True)
+        layout.addWidget(self.progress_bar)  # Them vao layout cua ban
+        self.progress_bar.hide()
+
+
         self.workers = []
         self.proxy_threads = []
         self.load_config()
@@ -1656,42 +1718,164 @@ class MainWindow(QMainWindow):
         # GỌI HÀM KIỂM TRA CẬP NHẬT KHI KHỞI ĐỘNG
         self.check_for_updates()
 
+        current_dir = os.path.dirname(sys.executable)
+        flag_file_path = os.path.join(current_dir, "update_success.flag")
+        if os.path.exists(flag_file_path):
+            QMessageBox.information(self, "Thành công", f"Ứng dụng đã được cập nhật thành công lên phiên bản {CURRENT_VERSION}!")
+            os.remove(flag_file_path) # Xoa file de lan sau khong hien thong bao nua
 
-    # Đặt hàm này bên trong class MainWindow
+        self.load_config()
+        # Goi ham kiem tra cap nhat
+        self.check_for_updates()
+
     def check_for_updates(self):
-        # THAY THẾ 'TEN_DANG_NHAP' VÀ 'TEN_KHO_CHUA' CỦA BẠN
+        # Ham nay gio chi con nhiem vu kiem tra va hoi xac nhan
         repo_owner = "blackshark9992"
         repo_name = "NAP_TIEN_L1"
-
         api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
 
         try:
             response = requests.get(api_url, timeout=5)
-            response.raise_for_status()  # Báo lỗi nếu request không thành công
-
+            response.raise_for_status()
             latest_release = response.json()
-            latest_version = latest_release["tag_name"].replace('v', '')  # Lấy phiên bản, loại bỏ chữ 'v'
+            latest_version = latest_release["tag_name"].replace('v', '')
 
-            # So sánh phiên bản
-            if latest_version > CURRENT_VERSION:
-                msg_box = QMessageBox()
-                msg_box.setIcon(QMessageBox.Information)
-                msg_box.setText(
-                    f"Đã có phiên bản mới ({latest_version})!\nPhiên bản của bạn là ({CURRENT_VERSION}).\n\nBạn có muốn tải về bản cập nhật không?")
-                msg_box.setWindowTitle("Thông báo cập nhật")
-                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            config = self.load_config_data()
+            skipped_version = config.get('skipped_version', '')
 
-                # Lấy link tải file .exe
-                download_url = latest_release["assets"][0]["browser_download_url"]
+            if latest_version > CURRENT_VERSION and latest_version != skipped_version:
+                message = f"Đã có phiên bản mới ({latest_version})!\nPhiên bản của bạn là ({CURRENT_VERSION}).\n\nBạn có muốn cập nhật không?"
 
-                return_value = msg_box.exec()
-                if return_value == QMessageBox.Yes:
-                    webbrowser.open(download_url)  # Mở trình duyệt để tải file
+                dialog = UpdateDialog(self, "Thông báo cập nhật", message)
+                result = dialog.exec_()
 
-        except requests.exceptions.RequestException as e:
-            print(f"Lỗi khi kiểm tra cập nhật: {e}")
-        except (KeyError, IndexError):
-            print("Lỗi: Không tìm thấy file đính kèm trong bản phát hành mới nhất.")
+                if result == QDialog.Accepted:
+                    download_url = latest_release["assets"][0]["browser_download_url"]
+                    self.start_update_process(download_url)
+                elif dialog.skip_checkbox.isChecked():
+                    self.save_skipped_version(latest_version)
+
+        except Exception as e:
+            print(f"Không thể kiểm tra cập nhật: {e}")
+
+    def load_config_data(self):
+        try:
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Lỗi khi đọc {CONFIG_FILE}: {e}")
+        return {}
+
+    def save_skipped_version(self, version_to_skip):
+        try:
+            config = self.load_config_data()
+            config['skipped_version'] = version_to_skip
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            logging.info(f"Đã lưu phiên bản cần bỏ qua: {version_to_skip}")
+        except Exception as e:
+            logging.error(f"Lỗi khi lưu phiên bản bỏ qua: {e}")
+
+    def load_config(self):
+        try:
+            if not CONFIG_FILE.exists():
+                default_config = {
+                    'link': '', 'proxy': '', 'account': '',
+                    'mode': 'BACARAT', 'chip': '1', 'headless': False,
+                    'skipped_version': ''  # Thêm key mới
+                }
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(default_config, f, indent=4, ensure_ascii=False)
+
+            config = self.load_config_data()
+            self.link_input.setText(config.get('link', ''))
+            self.proxy_input.setPlainText(config.get('proxy', ''))
+            self.account_input.setPlainText(config.get('account', ''))
+            self.mode_combo.setCurrentText(config.get('mode', 'BACARAT'))
+            self.chip_combo.setCurrentText(config.get('chip', '1'))
+            self.headless_checkbox.setChecked(config.get('headless', False))
+            self.previous_account_input = config.get('account', '')
+        except Exception as e:
+            logging.error(f"Lỗi khi tải config: {e}")
+
+    def save_config(self):
+        try:
+            config = self.load_config_data()
+            config.update({
+                'link': self.link_input.text().strip(),
+                'proxy': self.proxy_input.toPlainText().strip(),
+                'account': self.account_input.toPlainText().strip(),
+                'mode': self.mode_combo.currentText(),
+                'chip': self.chip_combo.currentText(),
+                'headless': self.headless_checkbox.isChecked()
+            })
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            self.previous_account_input = self.account_input.toPlainText().strip()
+        except Exception as e:
+            logging.error(f"Lỗi khi lưu config: {e}")
+
+    def start_update_process(self, download_url):
+        # Ham nay bat dau qua trinh tai file
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.run_button.setEnabled(False)  # Vo hieu hoa nut "Chay"
+
+        current_dir = os.path.dirname(sys.executable)
+        self.update_file_path_temp = os.path.join(current_dir, "update.tmp")
+
+        # Khoi tao va chay luong tai file
+        self.download_thread = DownloadThread(download_url, self.update_file_path_temp)
+        self.download_thread.progress.connect(self.update_progress)
+        self.download_thread.finished.connect(self.on_download_finished)
+        self.download_thread.error.connect(self.on_download_error)
+        self.download_thread.start()
+
+    def update_progress(self, percentage):
+        # Slot nay cap nhat gia tri cho thanh progress bar
+        self.progress_bar.setValue(percentage)
+
+    def on_download_error(self, error_message):
+        # Slot nay xu ly khi tai file bi loi
+        QMessageBox.critical(self, "Lỗi", f"Tải bản cập nhật thất bại: {error_message}")
+        self.progress_bar.hide()
+        self.run_button.setEnabled(True)
+
+    def on_download_finished(self, downloaded_file_path):
+        # Slot nay duoc goi khi tai xong 100%
+        # No se tu dong tat ung dung sau 2 giay
+        self.progress_bar.setFormat("Hoàn thành! Khởi động lại trong 3 giây...")
+
+        # Tao mot timer de tat ung dung sau 3 giay
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(3000, self.launch_updater_and_exit)
+
+    def launch_updater_and_exit(self):
+        # Ham nay tao va chay script .bat roi thoat
+        current_file_path = sys.executable
+        file_name = os.path.basename(current_file_path)
+        current_dir = os.path.dirname(current_file_path)
+        updater_script_path = os.path.join(current_dir, "updater.bat")
+
+        # Dinh nghia mot file flag de phien ban moi biet la vua cap nhat xong
+        flag_file_path = os.path.join(current_dir, "update_success.flag")
+
+        script_content = f"""
+    @echo off
+    echo Vui long cho trong giay lat de hoan tat cap nhat...
+    TIMEOUT /T 2 /NOBREAK > NUL
+    DEL "{current_file_path}"
+    REN "{self.update_file_path_temp}" "{file_name}"
+    echo. > "{flag_file_path}"
+    START "" "{current_file_path}"
+    (DEL "%~f0" & exit)
+    """
+        with open(updater_script_path, "w") as f:
+            f.write(script_content)
+
+        subprocess.Popen([updater_script_path])
+        sys.exit(0)
 
     def clear_data_files(self):
         """Xóa nội dung các file nap.txt, failed_accounts.txt và nap_tien.csv"""
